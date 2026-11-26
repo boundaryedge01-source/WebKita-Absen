@@ -1,0 +1,192 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0b5ed7">
+<title>WebKita Absensi</title>
+<style>
+:root{--bg:#0b1220;--card:#141d31;--line:#243049;--tx:#eaf0fb;--mut:#93a1bd;--pri:#2f7bff;--ok:#22c55e;--bad:#ef4444;--warn:#f59e0b}
+@media(prefers-color-scheme:light){:root{--bg:#f3f6fb;--card:#fff;--line:#dfe6f1;--tx:#12203a;--mut:#5b6980}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif}
+body{min-height:100vh;padding:max(14px,env(safe-area-inset-top)) 16px max(20px,env(safe-area-inset-bottom))}
+.wrap{max-width:480px;margin:0 auto}
+h1{font-size:22px;margin:6px 0 2px}h2{font-size:16px;margin:0 0 8px}
+.mut{color:var(--mut)}.small{font-size:12.5px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:16px;margin:12px 0}
+label{display:block;margin:10px 0 4px;font-size:13px;color:var(--mut)}
+input{width:100%;padding:13px 14px;border-radius:12px;border:1px solid var(--line);background:transparent;color:var(--tx);font:inherit}
+input:focus{outline:2px solid var(--pri);border-color:transparent}
+.code{letter-spacing:6px;text-transform:uppercase;text-align:center;font-size:24px;font-weight:700}
+button{font:inherit;cursor:pointer;border:0;border-radius:14px;padding:14px 16px;background:var(--pri);color:#fff;font-weight:700;width:100%;margin-top:12px}
+button.ghost{background:transparent;border:1px solid var(--line);color:var(--tx)}
+button.in{background:var(--ok)}button.out{background:#f97316}
+button:disabled{opacity:.5}
+.clock{font-size:44px;font-weight:800;text-align:center;letter-spacing:1px;font-variant-numeric:tabular-nums}
+.date{text-align:center;color:var(--mut);margin-bottom:6px}
+.row{display:flex;gap:8px;align-items:center;justify-content:space-between}
+.badge{display:inline-block;padding:2px 9px;border-radius:99px;font-size:12px;font-weight:700;background:#33415566;margin:1px 2px 1px 0}
+.b-ok{background:#22c55e26;color:var(--ok)}.b-bad{background:#ef444426;color:var(--bad)}.b-warn{background:#f59e0b26;color:var(--warn)}.b-info{background:#2f7bff26;color:var(--pri)}
+.err{color:var(--bad);font-size:13px;min-height:18px;margin-top:8px}
+.hist{display:flex;justify-content:space-between;gap:10px;padding:10px 0;border-top:1px solid var(--line)}
+.hist:first-child{border-top:0}
+#cam{position:fixed;inset:0;background:#000;z-index:50;display:none;flex-direction:column}
+#cam video{flex:1;width:100%;object-fit:cover;transform:scaleX(-1)}
+#cam .bar{padding:16px;display:flex;gap:10px;background:#000}
+#cam .bar button{margin:0}
+.hide{display:none!important}
+.logo{width:44px;height:44px;border-radius:12px;background:var(--pri);display:grid;place-items:center;font-size:24px}
+.stat{text-align:center}.stat b{display:block;font-size:20px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+a{color:var(--pri)}
+</style>
+</head>
+<body>
+<div class="wrap" id="app"><div class="card" style="text-align:center;margin-top:30vh">Memuat…</div></div>
+<div id="cam"><video id="vid" playsinline autoplay muted></video><div class="bar"><button class="ghost" id="camX" style="color:#fff;border-color:#555">Batal</button><button id="camGo">📸 Ambil Foto</button></div></div>
+<input type="file" accept="image/*" capture="user" id="fileCap" class="hide">
+
+<script>
+window.WK={firebase:{apiKey:"AIzaSyAz5a7xClRM_fZU519pZsXG2eCZKpelQEI",authDomain:"webkita-kasir-v1.firebaseapp.com",projectId:"webkita-kasir-v1",storageBucket:"webkita-kasir-v1.firebasestorage.app",messagingSenderId:"116825072876",appId:"1:116825072876:web:46fbb4a3e8662b161831c9"}};
+</script>
+<script type="module">
+import {initializeApp} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+import {getAuth,onAuthStateChanged,createUserWithEmailAndPassword,signInWithEmailAndPassword,signOut,sendPasswordResetEmail} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+import {initializeFirestore,doc,getDoc,setDoc,updateDoc,collection,query,where,onSnapshot,writeBatch,deleteDoc} from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+
+const app=initializeApp(window.WK.firebase),auth=getAuth(app),db=initializeFirestore(app,{experimentalAutoDetectLongPolling:true});
+const $=s=>document.querySelector(s),pad=n=>String(n).padStart(2,"0");
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const MON=["Jan","Feb","Mar","Apr","Mei","Jun","Jul","Agu","Sep","Okt","Nov","Des"],DAY=["Minggu","Senin","Selasa","Rabu","Kamis","Jumat","Sabtu"];
+
+/* ---------- jam: dikoreksi dengan jam server agar tidak bisa diakali dengan mengubah jam HP ---------- */
+let offset=0;
+async function syncClock(){try{const t0=Date.now(),r=await fetch("/?_="+t0,{method:"HEAD",cache:"no-store"}),t1=Date.now(),d=r.headers.get("date");if(d){offset=new Date(d).getTime()-(t0+t1)/2}}catch(e){}}
+const now=()=>Math.round(Date.now()+offset);
+const dstr=t=>{const d=new Date(t);return d.getFullYear()+"-"+pad(d.getMonth()+1)+"-"+pad(d.getDate())};
+const hhmm=t=>t?pad(new Date(t).getHours())+":"+pad(new Date(t).getMinutes()):"-";
+const tmin=t=>{const [h,m]=String(t||"0:0").split(":").map(Number);return h*60+m};
+const dmin=t=>{const d=new Date(t);return d.getHours()*60+d.getMinutes()};
+const fdate=s=>{const [y,m,d]=s.split("-").map(Number);return d+" "+MON[m-1]+" "+y};
+const dist=(a,b,c,d)=>{const R=6371000,r=x=>x*Math.PI/180,dl=r(c-a),dn=r(d-b),h=Math.sin(dl/2)**2+Math.cos(r(a))*Math.cos(r(c))*Math.sin(dn/2)**2;return 2*R*Math.asin(Math.sqrt(h))};
+const dtxt=m=>m==null?"-":m<1000?Math.round(m)+" m":(m/1000).toFixed(1)+" km";
+
+let U=null,link=null,store=null,me=null,recs=[],unsubs=[],loginMode="in",msg="";
+const view=h=>{$("#app").innerHTML=h};
+const L=(k,v)=>{try{localStorage.setItem(k,v)}catch(e){}};
+
+/* ---------- auth ---------- */
+onAuthStateChanged(auth,async u=>{
+  unsubs.forEach(f=>f());unsubs=[];U=u;link=null;store=null;me=null;recs=[];
+  await syncClock();
+  if(!u)return loginView();
+  try{const s=await getDoc(doc(db,"staffLinks",u.uid));link=s.exists()?s.data():null}catch(e){msg="Gagal memuat: "+e.message}
+  if(!link)return codeView();
+  await startHome()});
+
+function loginView(){
+  view(`<div style="text-align:center;margin:26px 0 8px"><div class="logo" style="margin:0 auto 10px">🕘</div><h1>WebKita Absensi</h1><div class="mut">Absen masuk &amp; pulang karyawan</div></div>
+  <div class="card"><div class="row" style="gap:6px"><button class="${loginMode==="in"?"":"ghost"}" id="mIn" style="margin:0">Masuk</button><button class="${loginMode==="up"?"":"ghost"}" id="mUp" style="margin:0">Daftar</button></div>
+  ${loginMode==="up"?`<label>Nama lengkap</label><input id="nm" autocomplete="name" placeholder="Nama Anda">`:""}
+  <label>Email</label><input id="em" type="email" autocomplete="email" inputmode="email" placeholder="email@contoh.com">
+  <label>Kata sandi</label><input id="pw" type="password" autocomplete="${loginMode==="in"?"current-password":"new-password"}" placeholder="Minimal 6 karakter">
+  <div class="err" id="err">${esc(msg)}</div>
+  <button id="go">${loginMode==="in"?"Masuk":"Buat Akun"}</button>
+  ${loginMode==="in"?`<button class="ghost" id="rs" style="margin-top:8px">Lupa kata sandi</button>`:""}</div>
+  <p class="small mut" style="text-align:center">Sudah login di HP lain? Cukup masuk dengan email yang sama.</p>`);
+  $("#mIn").onclick=()=>{loginMode="in";msg="";loginView()};$("#mUp").onclick=()=>{loginMode="up";msg="";loginView()};
+  const er=t=>{$("#err").textContent=t};
+  $("#go").onclick=async()=>{const em=$("#em").value.trim(),pw=$("#pw").value;if(!em||!pw)return er("Isi email dan kata sandi");
+    if(loginMode==="up"){const nm=($("#nm").value||"").trim();if(nm.length<2)return er("Isi nama lengkap");L("wka_name",nm)}
+    $("#go").disabled=true;try{if(loginMode==="up")await createUserWithEmailAndPassword(auth,em,pw);else await signInWithEmailAndPassword(auth,em,pw)}
+    catch(e){$("#go").disabled=false;const c=e.code||"";er(c.includes("email-already")?"Email sudah terdaftar. Pilih Masuk.":c.includes("weak")?"Kata sandi minimal 6 karakter":c.includes("invalid-email")?"Format email salah":c.includes("invalid-credential")||c.includes("wrong")||c.includes("user-not-found")?"Email atau kata sandi salah":"Gagal: "+e.message)}};
+  const rs=$("#rs");if(rs)rs.onclick=async()=>{const em=$("#em").value.trim();if(!em)return er("Isi email dulu");try{await sendPasswordResetEmail(auth,em);er("Tautan reset dikirim ke email Anda.")}catch(e){er("Gagal: "+e.message)}}}
+
+/* ---------- gabung toko dengan kode ---------- */
+function codeView(){
+  let nm="";try{nm=localStorage.getItem("wka_name")||""}catch(e){}
+  view(`<div style="text-align:center;margin:20px 0 6px"><div class="logo" style="margin:0 auto 10px">🏪</div><h1>Hubungkan ke Toko</h1><div class="mut">Minta <b>kode toko</b> kepada owner/atasan Anda</div></div>
+  <div class="card"><label>Nama Anda (tampil di laporan)</label><input id="nm" value="${esc(nm||U.displayName||"")}" autocomplete="name">
+  <label>Kode toko</label><input id="cd" class="code" maxlength="8" autocapitalize="characters" autocomplete="off" placeholder="••••••">
+  <div class="err" id="err">${esc(msg)}</div><button id="go">Hubungkan</button><button class="ghost" id="lo">Keluar (${esc(U.email||"")})</button></div>`);
+  $("#lo").onclick=()=>signOut(auth);
+  $("#go").onclick=async()=>{const code=$("#cd").value.trim().toUpperCase(),name=$("#nm").value.trim(),er=t=>{$("#err").textContent=t};
+    if(code.length<4)return er("Masukkan kode toko");if(name.length<2)return er("Isi nama Anda");$("#go").disabled=true;
+    try{const s=await getDoc(doc(db,"storeCodes",code));
+      if(!s.exists()){$("#go").disabled=false;return er("Kode tidak ditemukan. Periksa kembali.")}
+      const st=s.data();if(st.active===false){$("#go").disabled=false;return er("Kode ini sedang dinonaktifkan oleh owner.")}
+      const b=writeBatch(db);
+      b.set(doc(db,"users",st.ownerUid,"employees",U.uid),{name,email:U.email||"",code,active:true,createdAt:Date.now(),uid:U.uid,self:true});
+      b.set(doc(db,"staffLinks",U.uid),{ownerUid:st.ownerUid,code,name,email:U.email||"",joinedAt:Date.now()});
+      await b.commit();link={ownerUid:st.ownerUid,code,name};await startHome()}
+    catch(e){$("#go").disabled=false;er(/permission/i.test(e.message)?"Ditolak. Pastikan kode benar dan paket toko masih aktif.":"Gagal: "+e.message)}}}
+
+/* ---------- beranda ---------- */
+async function startHome(){
+  try{const s=await getDoc(doc(db,"storeCodes",link.code));store=s.exists()?s.data():null}catch(e){}
+  const ownerUid=link.ownerUid;
+  unsubs.push(onSnapshot(doc(db,"users",ownerUid,"employees",U.uid),s=>{me=s.exists()?s.data():null;home()},()=>{}));
+  unsubs.push(onSnapshot(query(collection(db,"users",ownerUid,"attendance"),where("empId","==",U.uid)),s=>{recs=s.docs.map(d=>({id:d.id,...d.data()}));home()},e=>{msg=e.message;home()}));
+  unsubs.push(onSnapshot(doc(db,"storeCodes",link.code),s=>{if(s.exists()){store=s.data();home()}},()=>{}));
+  home()}
+const R=()=>({start:store?.start||"08:00",end:store?.end||"17:00",grace:Number(store?.grace||0),ot:Number(store?.ot??30)});
+let tick=null;
+function home(){
+  if(!U||!link)return;const r=R(),t=now(),today=dstr(t),rec=recs.find(x=>x.date===today),inactive=me&&me.active===false;
+  const month=today.slice(0,7),mine=recs.filter(x=>x.date.startsWith(month)).sort((a,b)=>b.date.localeCompare(a.date));
+  const lateN=mine.filter(x=>x.late).length,overM=mine.reduce((s,x)=>s+(x.overMin||0),0);
+  const status=!rec?`<span class="badge b-warn">Belum absen masuk</span>`:rec.outAt?`<span class="badge b-ok">Sudah pulang</span>`:`<span class="badge b-info">Sedang bekerja</span>`;
+  view(`<div class="row" style="margin:6px 0 4px"><div><h1 style="font-size:19px">${esc(store?.bizName||"Toko")}</h1><div class="mut small">${esc(link.name||me?.name||"")} · ${esc(U.email||"")}</div></div><button class="ghost" id="lo" style="width:auto;margin:0;padding:8px 12px;font-size:13px">Keluar</button></div>
+  <div class="card"><div class="date" id="dt"></div><div class="clock" id="ck">--:--:--</div>
+  <div style="text-align:center;margin:6px 0">${status}</div>
+  <div class="grid3" style="margin:12px 0 4px"><div class="stat"><span class="small mut">Masuk</span><b>${rec?hhmm(rec.inAt):"-"}</b></div><div class="stat"><span class="small mut">Pulang</span><b>${rec&&rec.outAt?hhmm(rec.outAt):"-"}</b></div><div class="stat"><span class="small mut">Jam kerja</span><b>${r.start}-${r.end}</b></div></div>
+  ${rec?`<div style="text-align:center">${rec.late?`<span class="badge b-bad">Telat ${rec.lateMin} menit</span>`:'<span class="badge b-ok">Tepat waktu</span>'}${rec.outside?'<span class="badge b-warn">Di luar lokasi</span>':""}${rec.overMin?`<span class="badge b-info">Lembur ${rec.overMin} mnt</span>`:""}${rec.outAt&&rec.earlyMin?`<span class="badge b-warn">Pulang cepat ${rec.earlyMin} mnt</span>`:""}</div>`:""}
+  ${inactive?'<div class="err">Akun Anda dinonaktifkan oleh owner.</div>':`<button class="in ${rec?"hide":""}" id="bIn">📸 Absen Masuk Sekarang</button><button class="out ${rec&&!rec.outAt?"":"hide"}" id="bOut">📸 Absen Pulang Sekarang</button>`}
+  <div class="err" id="err">${esc(msg)}</div></div>
+  <div class="card"><h2>Bulan ini</h2><div class="grid3"><div class="stat"><span class="small mut">Hadir</span><b>${mine.length}</b></div><div class="stat"><span class="small mut">Telat</span><b>${lateN}×</b></div><div class="stat"><span class="small mut">Lembur</span><b>${overM} mnt</b></div></div></div>
+  <div class="card"><h2>Riwayat</h2>${mine.map(x=>`<div class="hist"><div><b>${fdate(x.date)}</b><div class="small mut">${DAY[new Date(x.date+"T00:00").getDay()]}</div></div><div style="text-align:right"><div>${hhmm(x.inAt)} → ${x.outAt?hhmm(x.outAt):"…"}</div><div>${x.late?`<span class="badge b-bad">Telat ${x.lateMin}m</span>`:'<span class="badge b-ok">Tepat</span>'}${x.overMin?`<span class="badge b-info">Lembur ${x.overMin}m</span>`:""}${x.outside?'<span class="badge b-warn">Luar lokasi</span>':""}</div></div></div>`).join("")||'<div class="mut">Belum ada absen bulan ini</div>'}</div>
+  <p class="small mut" style="text-align:center">Jam memakai waktu server. Foto &amp; lokasi tercatat saat absen.</p>`);
+  $("#lo").onclick=()=>{if(confirm("Keluar dari akun?"))signOut(auth)};
+  const bi=$("#bIn"),bo=$("#bOut");if(bi)bi.onclick=()=>punch("in");if(bo)bo.onclick=()=>punch("out");
+  clearInterval(tick);const upd=()=>{const d=new Date(now());const c=$("#ck"),e=$("#dt");if(!c)return clearInterval(tick);c.textContent=pad(d.getHours())+":"+pad(d.getMinutes())+":"+pad(d.getSeconds());e.textContent=DAY[d.getDay()]+", "+d.getDate()+" "+MON[d.getMonth()]+" "+d.getFullYear()};upd();tick=setInterval(upd,1000)}
+
+/* ---------- kamera & lokasi ---------- */
+async function takePhoto(){
+  return new Promise(async(resolve,reject)=>{
+    const shrink=src=>{const w=src.videoWidth||src.naturalWidth,h=src.videoHeight||src.naturalHeight,sc=Math.min(1,360/Math.max(w,h)),c=document.createElement("canvas");c.width=Math.round(w*sc);c.height=Math.round(h*sc);const x=c.getContext("2d");x.drawImage(src,0,0,c.width,c.height);
+      const t=new Date(now());x.fillStyle="rgba(0,0,0,.55)";x.fillRect(0,c.height-18,c.width,18);x.fillStyle="#fff";x.font="11px sans-serif";x.fillText(t.getDate()+" "+MON[t.getMonth()]+" "+t.getFullYear()+" "+pad(t.getHours())+":"+pad(t.getMinutes())+":"+pad(t.getSeconds()),6,c.height-5);
+      let q=.6,u=c.toDataURL("image/jpeg",q);while(u.length>90000&&q>.3){q-=.1;u=c.toDataURL("image/jpeg",q)}return u};
+    const viaFile=()=>{const f=$("#fileCap");f.value="";f.onchange=()=>{const file=f.files[0];if(!file)return reject(new Error("Foto dibatalkan"));const im=new Image();im.onload=()=>resolve(shrink(im));im.onerror=()=>reject(new Error("Foto tidak terbaca"));im.src=URL.createObjectURL(file)};f.click()};
+    if(!navigator.mediaDevices?.getUserMedia)return viaFile();
+    let stream;try{stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:"user",width:{ideal:640},height:{ideal:640}},audio:false})}catch(e){return viaFile()}
+    const v=$("#vid"),cam=$("#cam");v.srcObject=stream;cam.style.display="flex";
+    const stop=()=>{stream.getTracks().forEach(t=>t.stop());cam.style.display="none";v.srcObject=null};
+    $("#camX").onclick=()=>{stop();reject(new Error("Foto dibatalkan"))};
+    $("#camGo").onclick=()=>{if(!v.videoWidth)return;const u=shrink(v);stop();resolve(u)}})}
+function getPos(){return new Promise((res,rej)=>{if(!navigator.geolocation)return rej(new Error("Perangkat tidak mendukung lokasi"));navigator.geolocation.getCurrentPosition(p=>res(p.coords),e=>rej(new Error(e.code===1?"Izin lokasi ditolak. Aktifkan lokasi untuk aplikasi ini.":"Lokasi tidak ditemukan. Aktifkan GPS lalu coba lagi.")),{enableHighAccuracy:true,timeout:25000,maximumAge:0})})}
+
+let busy=false;
+async function punch(kind){
+  if(busy)return;busy=true;msg="";const er=t=>{msg=t;const e=$("#err");if(e)e.textContent=t};const btn=$(kind==="in"?"#bIn":"#bOut");if(btn)btn.disabled=true;
+  try{
+    await syncClock();
+    if(btn)btn.textContent="Mengambil lokasi…";const pos=await getPos();
+    if(btn)btn.textContent="Ambil foto…";const photo=await takePhoto();
+    if(btn)btn.textContent="Menyimpan…";
+    const t=now(),r=R(),date=dstr(t),ref=doc(db,"users",link.ownerUid,"attendance",date+"_"+U.uid);
+    const hasStore=store&&store.lat!=null&&store.lng!=null,d=hasStore?dist(pos.latitude,pos.longitude,store.lat,store.lng):null,outside=hasStore?d>(store.radius||100):false;
+    if(outside&&store.strict)throw new Error("Anda di luar area kerja ("+dtxt(d)+" dari toko, batas "+(store.radius||100)+" m). Absen ditolak.");
+    if(kind==="in"){
+      const lm=dmin(t)-tmin(r.start),late=lm>r.grace;
+      await setDoc(ref,{empId:U.uid,name:link.name||me?.name||U.email,date,ts:t,inAt:t,outAt:0,late,lateMin:late?lm:0,workStart:r.start,inPhoto:photo,inLat:pos.latitude,inLng:pos.longitude,inDist:d,inAcc:pos.accuracy||0,outside,byApp:true});
+    }else{
+      const lm=dmin(t)-tmin(r.end);
+      await updateDoc(ref,{outAt:t,outPhoto:photo,outLat:pos.latitude,outLng:pos.longitude,outDist:d,outAcc:pos.accuracy||0,overMin:lm>=r.ot&&lm>0?lm:0,earlyMin:lm<0?-lm:0});
+    }
+    msg=""}
+  catch(e){er(/permission|insufficient/i.test(e.message||"")?"Ditolak server. Pastikan jam HP/jaringan normal dan akun masih aktif.":e.message||"Gagal")}
+  busy=false;home()}
+</script>
+</body>
+</html>
