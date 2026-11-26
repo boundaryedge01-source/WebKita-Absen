@@ -1,0 +1,143 @@
+name: Build APK Absensi Karyawan
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Siapkan folder www (cadangan offline)
+        run: |
+          mkdir -p www
+          cp absen.html www/index.html
+          cp offline.html manifest.json www/ 2>/dev/null || true
+          cp -r icons www/icons
+
+      - name: Install Capacitor + plugin
+        run: |
+          npm init -y
+          npm install @capacitor/core@6 @capacitor/cli@6 @capacitor/android@6 \
+            @capacitor/app@6 @capacitor/browser@6 @capacitor/filesystem@6 @capacitor/share@6
+
+      - name: Config Capacitor (app memuat situs Vercel di dalam WebView)
+        run: |
+          cat > capacitor.config.json <<'JSON'
+          {
+            "appId": "com.webkita.absensi",
+            "appName": "WebKita Absensi",
+            "webDir": "www",
+            "server": {
+              "url": "https://webkita-kasir-five.vercel.app/absen",
+              "androidScheme": "https",
+              "cleartext": false
+            }
+          }
+          JSON
+
+      - name: Tambah platform Android
+        run: |
+          npx cap add android
+          npx cap sync android
+
+      - name: Patch AndroidManifest (deep link + izin)
+        run: |
+          python3 - <<'PY'
+          p='android/app/src/main/AndroidManifest.xml'
+          s=open(p).read()
+          perms='''
+            <uses-permission android:name="android.permission.CAMERA" />
+            <uses-feature android:name="android.hardware.camera" android:required="false" />
+            <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+            <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+            <uses-permission android:name="android.permission.INTERNET" />
+          '''
+          j=s.index('</manifest>')
+          s=s[:j]+perms+s[j:]
+          open(p,'w').write(s)
+          PY
+
+      - name: Ikon aplikasi dari logo WebKasir
+        run: |
+          sudo apt-get install -y imagemagick >/dev/null
+          R=android/app/src/main/res
+          rm -f $R/mipmap-anydpi-v26/ic_launcher*.xml
+          rm -f $R/drawable-v24/ic_launcher_foreground.xml $R/drawable/ic_launcher_background.xml
+          make() { d=$1; l=$2; f=$3; mkdir -p $R/mipmap-$d
+            convert icons/icon-maskable-512.png -resize ${l}x${l} $R/mipmap-$d/ic_launcher.png
+            convert icons/icon-maskable-512.png -resize ${l}x${l} $R/mipmap-$d/ic_launcher_round.png
+            convert icons/icon-maskable-512.png -resize ${f}x${f} $R/mipmap-$d/ic_launcher_foreground.png; }
+          make mdpi 48 108; make hdpi 72 162; make xhdpi 96 216; make xxhdpi 144 324; make xxxhdpi 192 432
+          find $R -name 'ic_launcher*' | head -30
+
+      - name: Perbaikan kotlin-stdlib
+        run: |
+          cat >> android/build.gradle <<'EOF2'
+
+          subprojects {
+              configurations.all {
+                  resolutionStrategy {
+                      force 'org.jetbrains.kotlin:kotlin-stdlib:1.8.22'
+                      force 'org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.8.22'
+                      force 'org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.8.22'
+                  }
+              }
+          }
+          EOF2
+
+      - name: Nomor versi otomatis
+        run: |
+          sed -i "s/versionCode 1/versionCode ${{ github.run_number }}/; s/versionName \"1.0\"/versionName \"1.0.${{ github.run_number }}\"/" android/app/build.gradle
+          grep -n "versionCode\|versionName" android/app/build.gradle
+
+      - name: Cek keystore tersedia
+        id: ks
+        env:
+          KS: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$KS" ]; then echo "ada=true" >> $GITHUB_OUTPUT; else echo "ada=false" >> $GITHUB_OUTPUT; fi
+
+      - name: Build APK rilis (bertanda tangan)
+        if: steps.ks.outputs.ada == 'true'
+        working-directory: android
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASS: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease
+          echo "$KEYSTORE_BASE64" | base64 -d > $RUNNER_TEMP/release.jks
+          BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
+          UNSIGNED=$(ls app/build/outputs/apk/release/*.apk | head -1)
+          $BT/zipalign -p 4 "$UNSIGNED" $RUNNER_TEMP/aligned.apk
+          mkdir -p ../out
+          $BT/apksigner sign --ks $RUNNER_TEMP/release.jks --ks-pass env:KS_PASS --key-pass env:KEY_PASS --ks-key-alias "$KEY_ALIAS" --out ../out/WebKita-Absensi-rilis.apk $RUNNER_TEMP/aligned.apk
+          $BT/apksigner verify --print-certs ../out/WebKita-Absensi-rilis.apk | head -5
+          rm -f $RUNNER_TEMP/release.jks
+
+      - name: Build APK debug (jika keystore belum diisi)
+        if: steps.ks.outputs.ada != 'true'
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug
+          mkdir -p ../out
+          cp app/build/outputs/apk/debug/app-debug.apk ../out/WebKita-Absensi-debug.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WebKita-Absensi-APK
+          path: out/*.apk
