@@ -1,0 +1,156 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ====== GANTI dengan email akun admin Anda (sama dengan CONFIG.ADMIN_EMAIL di index.html) ======
+    function isAdmin() {
+      return request.auth != null
+        && request.auth.token.email == "abdurrahmansudais953@gmail.com"
+        && request.auth.token.email_verified == true;
+    }
+    function signedIn() { return request.auth != null; }
+    function isOwner(uid) { return signedIn() && request.auth.uid == uid; }
+
+    // Paket aktif? (dicek di server, jadi akun kedaluwarsa tidak bisa menulis lewat trik apa pun)
+    function planActive(uid) {
+      return get(/databases/$(database)/documents/users/$(uid)).data.plan.expiresAt > request.time.toMillis();
+    }
+
+    match /users/{uid} {
+      allow read: if isOwner(uid) || isAdmin();
+
+      // Saat daftar: paket hanya boleh "none" atau "trial" maksimal 15 hari. Paket berbayar hanya bisa diubah admin.
+      allow create: if isOwner(uid)
+        && request.resource.data.referralBalance == 0
+        && request.resource.data.referralEarned == 0
+        && (
+          (request.resource.data.plan.type == 'none' && request.resource.data.plan.expiresAt == 0)
+          || (request.resource.data.plan.type == 'trial'
+              && request.resource.data.plan.expiresAt <= request.time.toMillis() + 15 * 86400000)
+        );
+
+      // Pemilik tidak boleh mengubah paket, saldo komisi, kode referal, referredBy
+      allow update: if isAdmin()
+        || (isOwner(uid)
+            && !request.resource.data.diff(resource.data).affectedKeys()
+                 .hasAny(['plan','referralBalance','referralEarned','referralCode','referredBy','createdAt']));
+
+      // Data bisnis: baca selalu boleh (agar bisa diunduh), tulis hanya saat paket aktif
+      match /products/{id}  { allow read: if isOwner(uid); allow write: if isOwner(uid) && planActive(uid); }
+      match /sales/{id}     { allow read: if isOwner(uid); allow write: if isOwner(uid) && planActive(uid); }
+      match /expenses/{id}  { allow read: if isOwner(uid); allow write: if isOwner(uid) && planActive(uid); }
+
+      // Riwayat stok & opname = catatan permanen: hanya bisa ditambah (saat paket aktif), tidak bisa diubah/dihapus
+      match /stockLogs/{id}     { allow read: if isOwner(uid); allow create, delete: if isOwner(uid) && planActive(uid); allow update: if false; }
+      match /stockOpnames/{id}  { allow read: if isOwner(uid); allow create, delete: if isOwner(uid) && planActive(uid); allow update: if false; }
+      // Pelanggan, transaksi keranjang, kasbon
+      match /customers/{id}     { allow read: if isOwner(uid); allow write: if isOwner(uid) && planActive(uid); }
+      match /trxs/{id}          { allow read: if isOwner(uid); allow write: if isOwner(uid) && planActive(uid); }
+      match /debts/{id}         { allow read: if isOwner(uid); allow write: if isOwner(uid) && planActive(uid); }
+      // Karyawan & absensi
+      // Karyawan boleh bergabung sendiri HANYA dengan kode toko yang benar (id dokumen = uid karyawan); selebihnya hanya pemilik.
+      match /employees/{id} {
+        allow read: if isOwner(uid) || (signedIn() && request.auth.uid == id);
+        allow create: if (isOwner(uid) && planActive(uid))
+          || (signedIn() && request.auth.uid == id
+              && request.resource.data.keys().hasOnly(['name','email','code','active','createdAt','uid','self'])
+              && request.resource.data.active == true
+              && request.resource.data.code is string
+              && request.resource.data.name is string && request.resource.data.name.size() <= 60
+              && get(/databases/$(database)/documents/storeCodes/$(request.resource.data.code)).data.ownerUid == uid
+              && get(/databases/$(database)/documents/storeCodes/$(request.resource.data.code)).data.active == true);
+        allow update, delete: if isOwner(uid) && planActive(uid);
+      }
+      // Absensi: pemilik penuh. Karyawan: hanya buat absen MASUK miliknya (jam harus mendekati jam server) dan mengisi absen PULANG sekali.
+      match /attendance/{id} {
+        allow read: if isOwner(uid) || (signedIn() && resource.data.empId == request.auth.uid);
+        allow write: if isOwner(uid) && planActive(uid);
+        allow create: if signedIn()
+          && request.resource.data.empId == request.auth.uid
+          && id == request.resource.data.date + '_' + request.auth.uid
+          && exists(/databases/$(database)/documents/users/$(uid)/employees/$(request.auth.uid))
+          && get(/databases/$(database)/documents/users/$(uid)/employees/$(request.auth.uid)).data.active == true
+          && planActive(uid)
+          && request.resource.data.inAt is number
+          && request.resource.data.inAt > request.time.toMillis() - 300000
+          && request.resource.data.inAt < request.time.toMillis() + 60000
+          && request.resource.data.outAt == 0
+          && (!('inPhoto' in request.resource.data) || request.resource.data.inPhoto.size() < 120000);
+        allow update: if signedIn()
+          && resource.data.empId == request.auth.uid
+          && resource.data.outAt == 0
+          && planActive(uid)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['outAt','outPhoto','outLat','outLng','outDist','outAcc','overMin','earlyMin'])
+          && request.resource.data.outAt > request.time.toMillis() - 300000
+          && request.resource.data.outAt < request.time.toMillis() + 60000
+          && (!('outPhoto' in request.resource.data) || request.resource.data.outPhoto.size() < 120000);
+      }
+
+      // Notifikasi: boleh dibuat, ditandai dibaca, dan dihapus oleh pemilik (fitur Hapus Semua/Reset, dilindungi sandi di aplikasi). Isinya tidak boleh diubah.
+      match /notifications/{id} {
+        allow read: if isOwner(uid);
+        allow create: if isOwner(uid) || isAdmin();
+        allow update: if isOwner(uid)
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+        allow delete: if isOwner(uid) && planActive(uid);
+      }
+    }
+
+    // Kode toko absensi: karyawan hanya bisa membaca bila tahu kodenya (get), tidak bisa melihat daftar. Isi: aturan absen & titik toko.
+    match /storeCodes/{code} {
+      allow get: if signedIn();
+      allow list: if false;
+      allow create: if signedIn() && request.resource.data.ownerUid == request.auth.uid && !exists(/databases/$(database)/documents/storeCodes/$(code));
+      allow update, delete: if signedIn() && resource.data.ownerUid == request.auth.uid && request.resource.data.ownerUid == request.auth.uid;
+    }
+    // Tautan karyawan -> toko (dibaca karyawan sendiri saat membuka aplikasi)
+    match /staffLinks/{uid} {
+      allow read: if signedIn() && request.auth.uid == uid;
+      allow create, update: if signedIn() && request.auth.uid == uid
+        && get(/databases/$(database)/documents/storeCodes/$(request.resource.data.code)).data.ownerUid == request.resource.data.ownerUid
+        && get(/databases/$(database)/documents/storeCodes/$(request.resource.data.code)).data.active == true;
+      allow delete: if signedIn() && request.auth.uid == uid;
+    }
+
+    match /referralCodes/{code} {
+      allow get: if true;
+      allow list: if false;
+      allow create: if signedIn() && request.resource.data.uid == request.auth.uid && !exists(/databases/$(database)/documents/referralCodes/$(code));
+    }
+
+    match /referrals/{id} {
+      allow create: if signedIn()
+        && request.resource.data.referredUid == request.auth.uid
+        && request.resource.data.referrerUid != request.auth.uid
+        && request.resource.data.status == 'terdaftar'
+        && request.resource.data.commission == 0
+        && request.resource.data.paidAmount == 0;
+      allow read: if signedIn() && (resource.data.referrerUid == request.auth.uid || isAdmin());
+      allow update: if isAdmin();
+    }
+
+    // Tagihan dibuat HANYA oleh server (lewat Admin SDK, yang tidak terkena aturan ini)
+    match /payments/{id} {
+      // Tagihan Midtrans dibuat server. Tagihan manual (transfer/QRIS) boleh dibuat pengguna, hanya dengan harga paket yang benar & status pending.
+      allow create: if signedIn()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.via == 'manual'
+        && request.resource.data.status == 'pending'
+        && (   (request.resource.data.plan == 'monthly' && request.resource.data.amount == 79000)
+            || (request.resource.data.plan == 'yearly'  && request.resource.data.amount == 499000)
+            || (request.resource.data.plan == 'proplus' && request.resource.data.amount == 499000));
+      allow read: if signedIn() && (resource.data.uid == request.auth.uid || isAdmin());
+      allow update: if isAdmin();
+    }
+
+    match /payouts/{id} {
+      allow create: if signedIn() && request.resource.data.uid == request.auth.uid
+                    && request.resource.data.status == 'pending'
+                    && request.resource.data.amount is number
+                    && request.resource.data.amount >= 50000
+                    && request.resource.data.amount <= get(/databases/$(database)/documents/users/$(request.auth.uid)).data.referralBalance;
+      allow read: if signedIn() && (resource.data.uid == request.auth.uid || isAdmin());
+      allow update: if isAdmin();
+    }
+  }
+}
